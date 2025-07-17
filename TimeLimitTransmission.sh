@@ -40,8 +40,7 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] | [$LEVEL] | $*" | tee -a "$LOG"
 }
 
-log INFO "=== Transmission seeding time limit started ==="
-log INFO "=== $(date) ==="
+log INFO "=== $(date) | Transmission seeding time limit started ==="
 
 case "$TORRENT_FINAL_STATE" in
   stop|remove|remove-and-delete)
@@ -93,7 +92,7 @@ log DEBUG "SEED_HOURS :: $SEED_HOURS"
 log DEBUG "=== generated variables ==="
 log DEBUG "COMBINE_FILTER :: $COMBINE_FILTER"
 log DEBUG "TRANS_REMOTE :: ${TRANS_REMOTE[@]}"
-log INFO "SEED_TIME_LIMIT :: $SEED_TIME_LIMIT"
+log DEBUG "SEED_TIME_LIMIT :: $SEED_TIME_LIMIT"
 log DEBUG "=== variables end ==="
 
 # list torrents matching filter
@@ -104,6 +103,7 @@ TORRENT_IDS=$(echo "$TORRENT_LIST" | awk 'NR > 1 && $1 ~ /^[0-9]+$/ { print $1 }
 if [[ $CHECK_ERRORED_TORRENTS -eq 1 ]]; then
     log DEBUG "Checking for any errored torrents and adding them"
     ERROR_TORRENT_IDS=$(echo "$TORRENT_LIST" | awk 'NR > 1 && $1 ~ /^[0-9]+\*$/ { gsub(/\*/, "", $1); print $1 }')
+    log DEBUG "Found $(echo "$ERROR_TORRENT_IDS" | wc -w) errored torrents"
 fi
 ALL_IDS="$TORRENT_IDS $ERROR_TORRENT_IDS"
 log INFO "Starting processing of $(echo "$ALL_IDS" | wc -w) different torrents"
@@ -114,7 +114,7 @@ NO_SEED_TIME_IDS=()
 NOW=$(date +%s )
 
 for ID in $ALL_IDS; do
-    log DEBUG "Torrent ID: $ID | Processing|"
+    log DEBUG "Torrent ID: $ID | Processing |"
     ID_JSON=$($REMOTE -j -t $ID -i)
     
     ID_SEEDTIME=$(echo "$ID_JSON" | jq '.arguments.torrents[0].secondsSeeding')
@@ -125,18 +125,28 @@ for ID in $ALL_IDS; do
     
     if [[ $CHECK_ADDED_DATE -eq 1 && $ID_SEEDTIME -lt $SEED_TIME_LIMIT ]]; then
     
-        # doneDate more accurate for actual seeding time
-        if [[ $ID_DONETIME -gt $ID_ADDEDTIME ]]; then
-            TIME_SINCE_ADD=$(( NOW - ID_DONETIME ))
+        if [[ $ID_SEEDTIME -gt 0 ]]; then
+            if [[ $ID_SEEDTIME -gt $SEED_TIME_LIMIT ]]; then
+                EXCEEDED_IDS+=("$ID")
+                log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds secondsSeeding: $ID_SEEDTIME"
+            else
+                log DEBUG "Torrent ID: $ID | No action | secondsSeeding $ID_SEEDTIME is less than $SEED_TIME_LIMIT limit"
+            fi
         else
-            TIME_SINCE_ADD=$(( NOW - ID_ADDEDTIME ))
-        fi
-        
-        if [[ $TIME_SINCE_ADD -gt $SEED_TIME_LIMIT ]]; then
-            log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds      addedDate: $TIME_SINCE_ADD"
-            NO_SEED_TIME_IDS+=("$ID")
-        else
-            log DEBUG "Torrent ID: $ID | No action | TIME_SINCE_ADD $TIME_SINCE_ADD is less than $SEED_TIME_LIMIT limit"
+    
+            # doneDate more accurate for actual seeding time
+            if [[ $ID_DONETIME -gt $ID_ADDEDTIME ]]; then
+                TIME_SINCE_ADD=$(( NOW - ID_DONETIME ))
+            else
+                TIME_SINCE_ADD=$(( NOW - ID_ADDEDTIME ))
+            fi
+            
+            if [[ $TIME_SINCE_ADD -gt $SEED_TIME_LIMIT ]]; then
+                log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds      addedDate: $TIME_SINCE_ADD"
+                NO_SEED_TIME_IDS+=("$ID")
+            else
+                log DEBUG "Torrent ID: $ID | No action | TIME_SINCE_ADD $TIME_SINCE_ADD is less than $SEED_TIME_LIMIT limit"
+            fi
         fi
         
     elif [[ $ID_SEEDTIME -gt $SEED_TIME_LIMIT ]]; then
@@ -151,31 +161,40 @@ for ID in $ALL_IDS; do
 
 done
 
-log DEBUG "=== DEBUG is NOT changing the following torrents ==="
-if [[ $CHECK_ADDED_DATE -eq 1 ]]; then
-    log WARN "These IDs do not show a 'Seconds Seeding' value. Instead they were checked against their 'Added Date' or 'Done Date's"
-    log WARN "${NO_SEED_TIME_IDS[@]}"
+
+
+if [[ ${#EXCEEDED_IDS[@]} -eq 0 && ${#NO_SEED_TIME_IDS[@]} -eq 0 ]]; then
+    log INFO "No torrents matching filters are older than the time limit."
+    log DEBUG "ID Lists: ${EXCEEDED_IDS[@]} | ${NO_SEED_TIME_IDS[@]}"
+else
+    log DEBUG "=== DEBUG is NOT changing the following torrents ==="
+    
+    log INFO "The following torrent IDs have exceeded the set time limit:"
+    log INFO "${EXCEEDED_IDS[@]}"
+    
+    if [[ $CHECK_ADDED_DATE -eq 1 ]]; then
+        log INFO "These IDs do not show a 'Seconds Seeding' value. Instead they were checked against their 'Added Date' or 'Done Date's"
+        log INFO "${NO_SEED_TIME_IDS[@]}"
+    fi
+
+    PROCESSED_IDS=("${EXCEEDED_IDS[@]}" "${NO_SEED_TIME_IDS[@]}")
+    COMMA_IDS=$(IFS=,; echo "${PROCESSED_IDS[*]}")
+
+    log DEBUG "=== DEBUG is NOT changing the following torrents ==="
+    log DEBUG "IDs to $TORRENT_FINAL_STATE: ${EXCEEDED_IDS[@]} ${NO_SEED_TIME_IDS[@]}"
+    log INFO "Applying '$TORRENT_FINAL_STATE' to all IDs listed above"
+
+    log DEBUG "$REMOTE -t "$COMMA_IDS" --$TORRENT_FINAL_STATE"
+    # only if debug off
+    if [[ $ENABLE_DEBUG -eq 0 ]]; then
+        $REMOTE -t "$COMMA_IDS" --$TORRENT_FINAL_STATE
+    fi
+
+    COUNT_ACTIONED=${#PROCESSED_IDS[@]}
+    log DEBUG "=== DEBUG is NOT changing the following torrents ==="
+    log INFO "Completed setting '$TORRENT_FINAL_STATE' status on $COUNT_ACTIONED torrents"
+    log DEBUG "IDs processed: ${PROCESSED_IDS[@]}"
 fi
-
-log INFO "The following torrent IDs have exceeded the set time limit:"
-log INFO "${EXCEEDED_IDS[@]}"
-
-PROCESSED_IDS=("${EXCEEDED_IDS[@]}" "${NO_SEED_TIME_IDS[@]}")
-COMMA_IDS=$(IFS=,; echo "${PROCESSED_IDS[*]}")
-
-log DEBUG "=== DEBUG is NOT changing the following torrents ==="
-log INFO "Applying '$TORRENT_FINAL_STATE' to all IDs listed above"
-
-log DEBUG "$REMOTE -t "$COMMA_IDS" --$TORRENT_FINAL_STATE"
-# only if debug off
-if [[ $ENABLE_DEBUG -eq 0 ]]; then
-    $REMOTE -t "$COMMA_IDS" --$TORRENT_FINAL_STATE
-fi
-
-COUNT_ACTIONED=${#PROCESSED_IDS[@]}
-log DEBUG "=== DEBUG is NOT changing the following torrents ==="
-log INFO "Completed setting '$TORRENT_FINAL_STATE' status on $COUNT_ACTIONED torrents"
-log DEBUG "IDs processed: ${PROCESSED_IDS[@]}"
 
 if [[ $LINECOUNT -ne 0 ]]; then
     LINECOUNT=$(wc -l < $LOG)
@@ -183,4 +202,3 @@ if [[ $LINECOUNT -ne 0 ]]; then
         echo "$(tail -$LOGLINES $LOG)" > "$LOG"
     fi
 fi
-
