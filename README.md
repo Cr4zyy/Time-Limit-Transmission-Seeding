@@ -45,14 +45,12 @@ TORRENT_FILTER_SPECIAL=""
 To **negate** a filter, prefix with `~`.
 Example: `~l:alwaysseed` - excludes torrents labeled `alwaysseed`.
 
-### Some confirmation checks
+### Check anything errored
 
 ```
-CHECK_ADDED_DATE=1
 CHECK_ERRORED_TORRENTS=1
 ```
 
-* `CHECK_ADDED_DATE`, uses the torrents `Added Date` (or `Done Date` if available) when `Seconds Seeding` is not reported.
 * `CHECK_ERRORED_TORRENTS` Set to `0` allows skipping torrents with errors.
 
 ### Final Torrent State
