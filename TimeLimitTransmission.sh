@@ -8,7 +8,6 @@ TORRENT_FILTER="iu" # no whitespaces: i (idle), u (uploading), d (downloading)
 TORRENT_FILTER_SPECIAL="" # white space seperated: l:label (torrent has "label"), n:str (name contains "str"), r:ratio (minimum upload ratio)
 #you can negate a filter by prefixing ~, "~l:alwaysseed" would ignore all torrents with the label 'alwaysseed'
 
-CHECK_ADDED_DATE=1 # Not all versions report the "Seconds Seeding" value, so set to 1, to use "Added Date", this will also check for "Done Date" if set for a more accurate seeding time.
 CHECK_ERRORED_TORRENTS=1 # You can either check, 1, or skip, 0, any torrents that are showing any errors currently. 
 
 # The state you want the torrent to be set once time is completed
@@ -116,47 +115,68 @@ NOW=$(date +%s )
 for ID in $ALL_IDS; do
     log DEBUG "Torrent ID: $ID | Processing |"
     ID_JSON=$($REMOTE -j -t $ID -i)
-    
-    ID_SEEDTIME=$(echo "$ID_JSON" | jq '.arguments.torrents[0].secondsSeeding')
-    ID_ADDEDTIME=$(echo "$ID_JSON" | jq '.arguments.torrents[0].addedDate')
-    ID_DONETIME=$(echo "$ID_JSON" | jq '.arguments.torrents[0].doneDate')
-    
+
+    if echo "$ID_JSON" | jq -e '.arguments' > /dev/null 2>&1; then
+        #pre 4.1
+        BASE=".arguments"
+        FIELD_SEEDTIME="secondsSeeding"
+        FIELD_ADDEDTIME="addedDate"
+        FIELD_DONETIME="doneDate"
+    elif echo "$ID_JSON" | jq -e '.result' > /dev/null 2>&1; then
+        #4.1 onwards
+        BASE=".result"
+        FIELD_SEEDTIME="seconds_seeding" #this is now exact time spent uploading? not just seeding
+        FIELD_ADDEDTIME="added_date"
+        FIELD_DONETIME="done_date"
+    else
+        ACTUAL_KEYS=$(echo "$ID_JSON" | jq -r 'keys[]')
+        log ERROR "JSON returned unknown key(s): $ACTUAL_KEYS"
+        exit 1
+    fi
+
+    ID_SEEDTIME=$(echo "$ID_JSON" | jq "${BASE}.torrents[0].${FIELD_SEEDTIME}")
+    ID_ADDEDTIME=$(echo "$ID_JSON" | jq "${BASE}.torrents[0].${FIELD_ADDEDTIME}")
+    ID_DONETIME=$(echo "$ID_JSON" | jq "${BASE}.torrents[0].${FIELD_DONETIME}")
+
     TIME_SINCE_ADD=""
     
-    if [[ $CHECK_ADDED_DATE -eq 1 && $ID_SEEDTIME -lt $SEED_TIME_LIMIT ]]; then
-    
-        if [[ $ID_SEEDTIME -gt 0 ]]; then
-            if [[ $ID_SEEDTIME -gt $SEED_TIME_LIMIT ]]; then
-                EXCEEDED_IDS+=("$ID")
-                log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds secondsSeeding: $ID_SEEDTIME"
-            else
-                log DEBUG "Torrent ID: $ID | No action | secondsSeeding $ID_SEEDTIME is less than $SEED_TIME_LIMIT limit"
-            fi
-        else
-    
-            # doneDate more accurate for actual seeding time
-            if [[ $ID_DONETIME -gt $ID_ADDEDTIME ]]; then
-                TIME_SINCE_ADD=$(( NOW - ID_DONETIME ))
-            else
-                TIME_SINCE_ADD=$(( NOW - ID_ADDEDTIME ))
-            fi
-            
-            if [[ $TIME_SINCE_ADD -gt $SEED_TIME_LIMIT ]]; then
-                log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds      addedDate: $TIME_SINCE_ADD"
-                NO_SEED_TIME_IDS+=("$ID")
-            else
-                log DEBUG "Torrent ID: $ID | No action | TIME_SINCE_ADD $TIME_SINCE_ADD is less than $SEED_TIME_LIMIT limit"
-            fi
-        fi
-        
-    elif [[ $ID_SEEDTIME -gt $SEED_TIME_LIMIT ]]; then
-    
-        EXCEEDED_IDS+=("$ID")
-        log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds secondsSeeding: $ID_SEEDTIME"
-        
-    else
-        log DEBUG "Torrent ID: $ID | No action | secondsSeeding $ID_SEEDTIME is less than $SEED_TIME_LIMIT limit"
+    if [[ -z "$ID_ADDEDTIME" || "$ID_ADDEDTIME" == "null" ]] || [[ -z "$ID_DONETIME" || "$ID_DONETIME" == "null" ]]; then
+        log ERROR "Returned json fields null or empty"
+        log ERROR "ID_ADDEDTIME=$ID_ADDEDTIME ID_DONETIME=$ID_DONETIME"
+        exit 1
     fi
+
+    if [[ $CHECK_ADDED_DATE -ne 1 ]]; then
+        if [[ -z "$ID_SEEDTIME" || "$ID_SEEDTIME" == "null" ]]; then
+            log ERROR "ID_SEEDTIME is null or empty"
+            exit 1
+        fi
+    fi
+    # doneDate more accurate for actual seeding time
+    if [[ $ID_DONETIME -gt $ID_ADDEDTIME ]]; then
+        TIME_SINCE_ADD=$(( NOW - ID_DONETIME ))
+    else
+        TIME_SINCE_ADD=$(( NOW - ID_ADDEDTIME ))
+    fi
+    
+    if [[ $TIME_SINCE_ADD -gt $ID_SEEDTIME ]]; then
+        if [[ $TIME_SINCE_ADD -gt $SEED_TIME_LIMIT ]]; then
+            EXCEEDED_IDS+=("$ID")
+            log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds      TIME_SINCE_ADD: $TIME_SINCE_ADD"
+        else
+            log DEBUG "Torrent ID: $ID | No action | TIME_SINCE_ADD $TIME_SINCE_ADD is less than $SEED_TIME_LIMIT limit"
+        fi
+    elif [[ $ID_SEEDTIME -gt 0 ]]; then
+        if [[ $ID_SEEDTIME -gt $SEED_TIME_LIMIT ]]; then
+            EXCEEDED_IDS+=("$ID")
+            log DEBUG "Torrent ID: $ID | Will $TORRENT_FINAL_STATE | Exceeds secondsSeeding: $ID_SEEDTIME"
+        else
+            log DEBUG "Torrent ID: $ID | No action | secondsSeeding $ID_SEEDTIME is less than $SEED_TIME_LIMIT limit"
+        fi
+    else
+        NO_SEED_TIME_IDS+=("$ID")
+    fi
+
     log DEBUG "____________________________________________________"
 
 done
